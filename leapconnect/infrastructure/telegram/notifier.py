@@ -13,7 +13,11 @@ import httpx
 
 from leapconnect.application.ports.notifier import BaseNotifier, Notification
 from leapconnect.domain.notifications.models import TelegramUser
-from leapconnect.infrastructure.telegram.bot import BOT_COMMANDS, TelegramBotHandler
+from leapconnect.infrastructure.telegram.bot import (
+    BOT_COMMANDS,
+    NAVIGATE_COMMANDS,
+    TelegramBotHandler,
+)
 from leapconnect.infrastructure.telegram.config import TelegramConfig
 
 _LOGGER = logging.getLogger(__name__)
@@ -226,6 +230,7 @@ class TelegramNotifier(BaseNotifier):
             rights_checker = getattr(dispatcher, "_rights_checker", None)
             pin_checker = getattr(dispatcher, "_pin_checker", None)
             pin_setter = getattr(dispatcher, "_pin_setter", None)
+            destination_sender = getattr(dispatcher, "_destination_sender", None)
             self._bot_handler = TelegramBotHandler(
                 vehicle_cache=vehicle_cache,
                 command_executor=command_executor,
@@ -233,6 +238,7 @@ class TelegramNotifier(BaseNotifier):
                 rights_checker=rights_checker,
                 pin_checker=pin_checker,
                 pin_setter=pin_setter,
+                destination_sender=destination_sender,
             )
         self._callback_handler = asyncio.create_task(self._poll_updates(dispatcher))
 
@@ -282,8 +288,18 @@ class TelegramNotifier(BaseNotifier):
                                     )
                                 continue
 
-                            # Handle text messages (bot commands)
                             msg = update.get("message")
+
+                            # Shared location / venue → navigation destination
+                            if msg and (msg.get("location") or msg.get("venue")):
+                                chat_id = str(msg.get("chat", {}).get("id", ""))
+                                if chat_id in self._approved_chat_ids:
+                                    await self._handle_location_message(
+                                        client, msg, chat_id
+                                    )
+                                continue
+
+                            # Handle text messages (bot commands)
                             if msg and msg.get("text"):
                                 chat_id = str(msg.get("chat", {}).get("id", ""))
                                 if chat_id in self._approved_chat_ids:
@@ -382,6 +398,29 @@ class TelegramNotifier(BaseNotifier):
                     },
                 )
             await self.answer_callback_query(cq["id"])
+        elif cb_data.startswith("nav:"):
+            # Send / Cancel buttons of a /navigate proposal
+            if self._bot_handler:
+                await self.answer_callback_query(cq["id"])
+                text = await self._bot_handler.handle_navigation_callback(cb_data)
+                msg = cq.get("message")
+                if msg:
+                    # Replace the proposal (and its buttons) with the outcome
+                    with contextlib.suppress(Exception):
+                        await client.post(
+                            f"{self._base_url}/editMessageText",
+                            json={
+                                "chat_id": msg["chat"]["id"],
+                                "message_id": msg["message_id"],
+                                "text": text,
+                                "parse_mode": "HTML",
+                                "disable_web_page_preview": True,
+                            },
+                        )
+                else:
+                    await self._send_text(client, chat_id or self._chat_id, text)
+            else:
+                await self.answer_callback_query(cq["id"], "⚠️ Bot not active")
         elif cb_data.startswith("tguser:"):
             # Approve/reject user from Telegram inline button
             await self._handle_user_action_callback(client, cq, cb_data)
@@ -393,11 +432,29 @@ class TelegramNotifier(BaseNotifier):
         if not self._bot_handler:
             return
         text = msg.get("text", "")
+        cmd = text.strip().split()[0].split("@")[0].lstrip("/").lower()
+
+        # /navigate answers with Send / Cancel buttons
+        if cmd in NAVIGATE_COMMANDS:
+            query = text.strip().split(maxsplit=1)
+            response, keyboard = await self._bot_handler.handle_navigate(
+                query[1] if len(query) > 1 else ""
+            )
+            payload = {
+                "chat_id": chat_id,
+                "text": response,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            if keyboard:
+                payload["reply_markup"] = json.dumps(keyboard)
+            await client.post(f"{self._base_url}/sendMessage", json=payload)
+            return
+
         response = await self._bot_handler.handle_command(text)
         if not response:
             return
         # For /location, send native location pin
-        cmd = text.strip().split()[0].split("@")[0].lstrip("/")
         if cmd == "location":
             import re
 
@@ -732,6 +789,24 @@ class TelegramNotifier(BaseNotifier):
         else:
             text = "🚫 Your access request has been declined."
         await self._send_text(client, chat_id, text)
+
+    async def _handle_location_message(self, client, msg, chat_id: str) -> None:
+        """A location or venue shared in the chat: send it to the car."""
+        if not self._bot_handler:
+            return
+        await self._update_user_info(msg)
+        venue = msg.get("venue") or {}
+        location = venue.get("location") or msg.get("location") or {}
+        latitude, longitude = location.get("latitude"), location.get("longitude")
+        if latitude is None or longitude is None:
+            return
+        response = await self._bot_handler.handle_shared_location(
+            float(latitude),
+            float(longitude),
+            title=venue.get("title", ""),
+            address=venue.get("address", ""),
+        )
+        await self._send_text(client, chat_id, response)
 
     async def _send_text(self, client, chat_id: str, text: str) -> None:
         """Send a simple text message to a chat."""

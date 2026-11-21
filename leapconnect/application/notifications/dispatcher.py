@@ -64,8 +64,11 @@ class NotificationDispatcher:
         rights_checker: Callable | None = None,
         pin_checker: Callable | None = None,
         pin_setter: Callable | None = None,
+        destination_sender: Callable | None = None,
     ) -> None:
         self._repo = repo
+        # async fn(vin, latitude, longitude, name, address) -> dict|None
+        self._destination_sender = destination_sender
         self._image_composer = image_composer  # async fn(vin) -> bytes | None
         self._vehicle_cache = vehicle_cache  # VehicleStatusCache instance
         self._command_executor = command_executor  # async fn(vin, command) -> dict|None

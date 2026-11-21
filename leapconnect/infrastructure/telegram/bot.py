@@ -5,8 +5,14 @@ Provides vehicle status, commands, and system info through Telegram chat command
 
 from __future__ import annotations
 
+import html
 import logging
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import count
+
+from leapconnect.infrastructure.geocoding import search_places
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -14,6 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 BOT_COMMANDS = [
     {"command": "status", "description": "Vehicle status overview"},
     {"command": "location", "description": "Current vehicle location"},
+    {"command": "navigate", "description": "Send a destination to the car navigator"},
     {"command": "lock", "description": "Lock the vehicle"},
     {"command": "unlock", "description": "Unlock the vehicle"},
     {"command": "ac_on", "description": "Turn on climate control"},
@@ -82,6 +89,42 @@ COMMAND_LABELS = {
     "steering_wheel_heat_off": "🔥 Steering heat off",
 }
 
+# /navigate and its aliases
+NAVIGATE_COMMANDS = {"navigate", "nav", "naviga"}
+
+# "44.4949, 11.3426" / "44.4949 11.3426" / "44.4949;11.3426"
+_COORDS_RE = re.compile(
+    r"^\s*(-?\d{1,2}(?:\.\d+)?)\s*[,; ]\s*(-?\d{1,3}(?:\.\d+)?)\s*$"
+)
+
+# Destinations waiting for the user's confirmation (inline buttons)
+MAX_PENDING_DESTINATIONS = 20
+
+
+@dataclass(frozen=True)
+class Destination:
+    """A navigation target proposed to the user or sent to the car."""
+
+    latitude: float
+    longitude: float
+    name: str = ""
+    address: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.name or self.address or f"{self.latitude:.5f}, {self.longitude:.5f}"
+
+
+def parse_coordinates(text: str) -> tuple[float, float] | None:
+    """Parse "lat, lon" typed by the user; None when it isn't a coordinate pair."""
+    match = _COORDS_RE.match(text)
+    if not match:
+        return None
+    lat, lon = float(match.group(1)), float(match.group(2))
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return None
+    return lat, lon
+
 
 class TelegramBotHandler:
     """Handles Telegram bot commands by interfacing with the app layer."""
@@ -94,6 +137,8 @@ class TelegramBotHandler:
         rights_checker=None,
         pin_checker=None,
         pin_setter=None,
+        destination_sender=None,
+        place_search=search_places,
     ):
         """
         Args:
@@ -104,6 +149,10 @@ class TelegramBotHandler:
             rights_checker: callable(vin, command) -> bool for permission filtering.
             pin_checker: callable() -> bool — returns True if PIN is already configured.
             pin_setter: callable(pin: str) -> None — sets the vehicle PIN.
+            destination_sender: async callable(vin, latitude, longitude, name,
+                address) -> dict|None (raises PermissionError).
+            place_search: async callable(query) -> list of places with
+                latitude/longitude/name/address (address search).
         """
         self._vehicle_cache = vehicle_cache
         self._execute_command = command_executor
@@ -112,6 +161,10 @@ class TelegramBotHandler:
         self._pin_checker = pin_checker
         self._pin_setter = pin_setter
         self._pending_pin_command: str | None = None
+        self._destination_sender = destination_sender
+        self._place_search = place_search
+        self._pending_destinations: dict[str, Destination] = {}
+        self._destination_ids = count(1)
 
     def get_vin(self) -> str | None:
         """Get the first known VIN from the cache."""
@@ -143,6 +196,9 @@ class TelegramBotHandler:
             return self._cmd_unmute()
         elif cmd == "notifications":
             return self._cmd_notifications()
+        elif cmd in NAVIGATE_COMMANDS:
+            text, _keyboard = await self.handle_navigate(" ".join(args))
+            return text
         elif cmd in VEHICLE_COMMANDS:
             return await self._cmd_vehicle_action(cmd)
         else:
@@ -360,6 +416,13 @@ class TelegramBotHandler:
             lines.append("")
             lines.append("<b>⚡ Charging</b>")
             lines.extend(charging)
+
+        if _allowed("send_destination"):
+            lines.append("")
+            lines.append("<b>🧭 Navigation</b>")
+            lines.append("/navigate <i>address</i> — Send a destination to the car")
+            lines.append("/navigate <i>lat, lon</i> — Send coordinates")
+            lines.append("📎 Share a location — Send it to the car")
 
         lines.append("")
         lines.append("<b>📡 Tracking</b>")
@@ -672,3 +735,146 @@ class TelegramBotHandler:
         if stopped:
             return "✅ Tracking stopped."
         return "ℹ️ Tracking was not active."
+
+    # -- navigation ----------------------------------------------------------
+
+    def _navigation_unavailable(self) -> str | None:
+        """Why a destination can't be sent right now, or None when it can."""
+        vin = self.get_vin()
+        if not vin:
+            return "⚠️ No vehicle connected."
+        if not self._destination_sender:
+            return "⚠️ Navigation not available."
+        if self._rights_checker and not self._rights_checker(vin, "send_destination"):
+            return (
+                "🚫 Send destination — not available for this vehicle "
+                "(missing permission)"
+            )
+        return None
+
+    async def handle_navigate(self, query: str) -> tuple[str, dict | None]:
+        """/navigate <address | lat, lon> — returns (text, reply_markup).
+
+        Coordinates are sent straight away; an address is looked up and the
+        best match is proposed with Send / Cancel buttons, so a wrong match
+        never reaches the car.
+        """
+        unavailable = self._navigation_unavailable()
+        if unavailable:
+            return unavailable, None
+
+        query = query.strip()
+        if not query:
+            return (
+                "🧭 <b>Send a destination to the car</b>\n\n"
+                "/navigate <i>address or place</i>\n"
+                "/navigate <i>lat, lon</i>\n"
+                "or share a location from the 📎 menu.",
+                None,
+            )
+
+        coords = parse_coordinates(query)
+        if coords:
+            return await self.send_destination(Destination(*coords)), None
+
+        try:
+            places = await self._place_search(query)
+        except Exception as exc:
+            _LOGGER.warning("Telegram /navigate: address search failed: %s", exc)
+            return "❌ Address search failed, try again later.", None
+        if not places:
+            return (
+                f"🔍 No place found for <i>{html.escape(query)}</i>.\n"
+                "Try a more complete address (street, number, city).",
+                None,
+            )
+
+        place = places[0]
+        dest = Destination(
+            latitude=place.latitude,
+            longitude=place.longitude,
+            name=place.name,
+            address=place.address,
+        )
+        token = self._remember_destination(dest)
+        lines = [f"🧭 <b>{html.escape(dest.label)}</b>"]
+        if dest.address and dest.address != dest.name:
+            lines.append(html.escape(dest.address))
+        lines.append(
+            f'<a href="https://www.google.com/maps?q={dest.latitude},'
+            f'{dest.longitude}">View on map</a>'
+        )
+        lines.append("\nSend this destination to the car?")
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "🚗 Send to car", "callback_data": f"nav:send:{token}"},
+                    {"text": "✖️ Cancel", "callback_data": f"nav:cancel:{token}"},
+                ]
+            ]
+        }
+        return "\n".join(lines), keyboard
+
+    async def handle_shared_location(
+        self,
+        latitude: float,
+        longitude: float,
+        title: str = "",
+        address: str = "",
+    ) -> str:
+        """A location (or venue) shared in the chat is sent straight to the car."""
+        unavailable = self._navigation_unavailable()
+        if unavailable:
+            return unavailable
+        return await self.send_destination(
+            Destination(latitude, longitude, name=title, address=address)
+        )
+
+    async def handle_navigation_callback(self, callback_data: str) -> str:
+        """Send / Cancel buttons of a proposed destination."""
+        parts = callback_data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        token = parts[2] if len(parts) > 2 else ""
+        dest = self._pending_destinations.pop(token, None)
+        if dest is None:
+            return "⚠️ This destination has expired, use /navigate again."
+        if action == "cancel":
+            return f"✖️ Cancelled: {html.escape(dest.label)}"
+        if action == "send":
+            unavailable = self._navigation_unavailable()
+            if unavailable:
+                return unavailable
+            return await self.send_destination(dest)
+        return "⚠️ Unknown action."
+
+    async def send_destination(self, dest: Destination) -> str:
+        """Send a destination to the car and describe the outcome."""
+        vin = self.get_vin()
+        if not vin or not self._destination_sender:
+            return "⚠️ No vehicle connected."
+        try:
+            result = await self._destination_sender(
+                vin, dest.latitude, dest.longitude, dest.name, dest.address
+            )
+        except PermissionError:
+            return (
+                "🚫 Send destination — not available for this vehicle "
+                "(missing permission)"
+            )
+        except Exception as exc:
+            _LOGGER.warning("Telegram send destination failed: %s", exc)
+            return f"❌ Send destination failed: {html.escape(str(exc))}"
+        if result is None:
+            return "⚠️ No vehicle connected."
+        return (
+            f"✅ Destination sent to the car: <b>{html.escape(dest.label)}</b>\n"
+            "<i>Check the car screen to start navigation.</i>"
+        )
+
+    def _remember_destination(self, dest: Destination) -> str:
+        token = str(next(self._destination_ids))
+        self._pending_destinations[token] = dest
+        while len(self._pending_destinations) > MAX_PENDING_DESTINATIONS:
+            oldest = next(iter(self._pending_destinations))
+            del self._pending_destinations[oldest]
+        return token

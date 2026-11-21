@@ -30,6 +30,7 @@ from leapconnect.application.commands import (
     command_allowed,
     execute_mqtt_command,
     execute_vehicle_command,
+    send_vehicle_destination,
 )
 from leapconnect.application.hemisphere_memory import HemisphereMemory
 from leapconnect.application.notifications import NotificationDispatcher
@@ -399,6 +400,30 @@ class AppContainer:
             return None
         return await execute_vehicle_command(self.client, vehicle, command)
 
+    async def send_destination(
+        self,
+        vin: str,
+        latitude: float,
+        longitude: float,
+        name: str = "",
+        address: str = "",
+    ) -> dict | None:
+        """Send a navigation destination to the vehicle (Telegram bot)."""
+        if not self.client:
+            return None
+        try:
+            vehicle = self.find_vehicle(vin)
+        except Exception:
+            return None
+        return await send_vehicle_destination(
+            self.client,
+            vehicle,
+            latitude=latitude,
+            longitude=longitude,
+            name=name,
+            address=address,
+        )
+
     async def handle_mqtt_command(self, vin: str, command: str) -> None:
         """Handle a command received from Home Assistant via MQTT."""
         if not self.client:
@@ -581,6 +606,7 @@ class AppContainer:
                 self.sync_client and self.sync_client.operation_password
             ),
             pin_setter=self.set_vehicle_pin,
+            destination_sender=self.send_destination,
         )
         await self.notification_dispatcher.reload_config()
 

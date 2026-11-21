@@ -15,6 +15,7 @@ the data is already here.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -374,6 +375,45 @@ async def execute_vehicle_command(
     if not vehicle_has_right(vehicle, spec.right):
         raise PermissionError(f"Command '{command}' not available for this vehicle")
     return await spec.invoke(client, vehicle.vin, None)
+
+
+def ascii_label(text: str, max_length: int = 80) -> str:
+    """Plain-ASCII version of a place name for the head unit.
+
+    Accented letters are folded to their base letter (``Città`` → ``Citta``)
+    and anything else outside printable ASCII is dropped: non-ASCII names
+    crash the T03 navigator (issue #14).
+    """
+    folded = unicodedata.normalize("NFKD", text)
+    ascii_text = "".join(ch for ch in folded if " " <= ch <= "~")
+    return " ".join(ascii_text.split())[:max_length].strip()
+
+
+async def send_vehicle_destination(
+    client: AsyncLeapmotorApiClient,
+    vehicle: Vehicle,
+    *,
+    latitude: float,
+    longitude: float,
+    name: str = "",
+    address: str = "",
+) -> dict:
+    """Send a navigation destination to the head unit (Telegram bot).
+
+    Names are folded to plain ASCII; an empty name falls back to the
+    coordinates. Raises PermissionError when the vehicle lacks the
+    send-destination right.
+    """
+    spec = COMMANDS["send_destination"]
+    if not vehicle_has_right(vehicle, spec.right):
+        raise PermissionError("Command 'send_destination' not available")
+    params = DestinationParams(
+        address=ascii_label(address or name),
+        address_name=ascii_label(name or address),
+        latitude=latitude,
+        longitude=longitude,
+    )
+    return await spec.invoke(client, vehicle.vin, params)
 
 
 async def execute_mqtt_command(
