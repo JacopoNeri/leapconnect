@@ -320,6 +320,31 @@
           <span>The battery always stays between {{ form.min_soc }}% and {{ form.max_soc }}%.</span>
         </div>
 
+        <div class="card charge-plan">
+          <div class="card-title"><Zap :size="15" /> When to charge</div>
+          <div v-if="!plan.charges.length" class="empty-legs">
+            No charging needed for these trips: after the last one you are at {{ fmtSoc(lastLeg.soc_end) }}.
+          </div>
+          <div v-for="(c, i) in plan.charges" :key="'cp' + i" class="cp-row">
+            <div class="cp-day">
+              <span class="cp-dow">{{ fmtDow(c.start) }}</span>
+              <span class="cp-date">{{ fmtDate(c.start) }}</span>
+            </div>
+            <div class="cp-body">
+              <div class="cp-title">
+                {{ fmtTime(c.start) }} → {{ fmtTime(c.end) }}<span v-if="!sameDay(c.start, c.end)" class="cp-next"> ({{ fmtDayShort(c.end) }})</span>
+                <span class="cp-where">at {{ c.location }}</span>
+              </div>
+              <div class="cp-pills">
+                <span class="pill"><Clock :size="12" /> {{ fmtDuration(c.start, c.end) }}</span>
+                <span class="pill limit"><Gauge :size="12" /> Limit {{ chargeLimit(c) }}%</span>
+                <span class="pill muted">{{ fmtSoc(c.from_soc) }} → {{ fmtSoc(c.to_soc) }} · +{{ c.energy_kwh.toFixed(1) }} kWh · {{ c.power_kw }} kW</span>
+              </div>
+              <div class="cp-why">{{ chargeReason(c) }}</div>
+            </div>
+          </div>
+        </div>
+
         <div class="timeline">
           <div v-for="day in timelineDays" :key="day.key" class="day-group">
             <div class="day-header">{{ day.label }}</div>
@@ -332,6 +357,7 @@
                   <div class="tl-title">
                     Charge at {{ item.data.location }}
                     <span v-if="item.data.reason === 'topup'" class="tag">top-up</span>
+                    <span class="tag">limit {{ chargeLimit(item.data) }}%</span>
                     <span v-if="item.data.limited_by_time" class="tag warn">short stop</span>
                   </div>
                   <div class="tl-time">
@@ -389,7 +415,7 @@ import ToggleSwitch from '../components/ToggleSwitch.vue'
 import PlacePicker from '../components/PlacePicker.vue'
 import {
   AlertTriangle, ArrowLeftRight, ArrowRight, Battery, Bookmark, CalendarPlus, Car, CheckCircle2,
-  ChevronDown, Copy, Loader2, Plug, Plus, RefreshCw, Route, SlidersHorizontal, Star, Trash2, Zap,
+  ChevronDown, Clock, Copy, Gauge, Loader2, Plug, Plus, RefreshCw, Route, SlidersHorizontal, Star, Trash2, Zap,
 } from 'lucide-vue-next'
 
 const props = defineProps({
@@ -440,6 +466,8 @@ function dayKeyOffset(offset) {
 }
 function tomorrowAt(h) { return `${dayKeyOffset(1)}T${pad(h)}:00` }
 function fmtTime(s) { return parseLocal(s).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) }
+function fmtDow(s) { return parseLocal(s).toLocaleDateString('en-GB', { weekday: 'short' }) }
+function fmtDate(s) { return parseLocal(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) }
 function fmtDayShort(s) { return parseLocal(s).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' }) }
 function sameDay(a, b) { return a.slice(0, 10) === b.slice(0, 10) }
 function fmtDuration(a, b) {
@@ -460,6 +488,21 @@ function dayName(key) {
   if (key === dayKeyOffset(0)) return 'today'
   if (key === dayKeyOffset(1)) return 'tomorrow'
   return new Date(`${key}T00:00`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' })
+}
+
+// --- Charging suggestions ---
+// The car's charge limit goes in 5 % steps (20-100 %): the smallest step that
+// reaches the planned level, never above the maximum you accept.
+function chargeLimit(c) {
+  const maxStep = Math.floor(num(form.max_soc, 80) / 5) * 5
+  const wanted = c.limited_by_time ? maxStep : Math.ceil((c.to_soc - 0.05) / 5) * 5
+  return Math.max(20, Math.min(100, maxStep, wanted))
+}
+function chargeReason(c) {
+  const timing = form.charge_timing === 'late' ? 'Scheduled to finish when you leave.' : 'Plug in when you arrive.'
+  if (c.limited_by_time) return `${timing} The stop is too short to reach ${form.max_soc}%: you leave at about ${fmtSoc(c.to_soc)}.`
+  if (c.reason === 'topup') return `${timing} Top-up: the battery is below ${form.topup_below_soc}%.`
+  return `${timing} Needed so the next trips never go below ${form.min_soc}%.`
 }
 
 // --- SOC helpers ---
@@ -1092,4 +1135,19 @@ onBeforeUnmount(() => {
 .charge-chip.on { border-style: solid; color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); background: color-mix(in srgb, var(--green) 10%, transparent); }
 .tl-note { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
 .places-sub { text-transform: none; letter-spacing: 0; color: var(--muted); }
+.charge-plan .card-title { margin-bottom: 6px; }
+.cp-row { display: flex; gap: 12px; padding: 10px 0; border-top: 1px solid var(--divider); }
+.cp-row:nth-of-type(2) { border-top: none; }
+.cp-day { flex: 0 0 52px; height: 52px; border-radius: 12px; background: color-mix(in srgb, var(--green) 14%, transparent); color: var(--green); display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.1; }
+.cp-dow { font-size: 11px; text-transform: uppercase; font-weight: 600; }
+.cp-date { font-size: 13px; font-weight: 700; }
+.cp-body { flex: 1; min-width: 0; }
+.cp-title { font-size: 15px; font-weight: 700; color: var(--text); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.cp-next { font-size: 12px; font-weight: 500; color: var(--sub); }
+.cp-where { font-size: 12.5px; font-weight: 500; color: var(--sub); }
+.cp-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.pill { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: rgba(var(--accent-rgb), 0.12); color: var(--accent); }
+.pill.limit { background: color-mix(in srgb, var(--green) 14%, transparent); color: var(--green); }
+.pill.muted { background: var(--bg2); color: var(--sub); font-weight: 500; }
+.cp-why { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
 </style>
