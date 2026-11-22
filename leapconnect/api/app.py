@@ -23,6 +23,7 @@ from leapconnect.api.routers import (
     notifications,
     styling,
     system,
+    trip_planning,
     trips,
     vehicles,
     zones,
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     app.include_router(history.router)
     app.include_router(commands.router)
     app.include_router(trips.router)
+    app.include_router(trip_planning.router)
     app.include_router(charging.router)
     app.include_router(maintenance.router)
     app.include_router(notifications.router)

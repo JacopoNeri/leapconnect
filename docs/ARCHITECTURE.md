@@ -39,6 +39,7 @@ One subpackage per **bounded context**:
 |-----------------|----------|
 | `telemetry`     | `VehicleSnapshot`, `VehicleEvent`, `TransitionDetector` (state-change rules), battery SOH estimate from full-charge readings (`battery_health.py`) |
 | `trips`         | trip segmentation/merging, similarity scoring, charge-session detection (`analysis.py`) — trips are derived on the fly, there is no persistent Trip aggregate |
+| `trip_planning` | multi-day trip planner: SOC simulation leg by leg and charging suggestions (`planner.py`) — stateless, only the user's planner form is stored (settings table) |
 | `charging`      | price tiers, time-of-use bands, session costs, TOU cost calculation (`costing.py`) |
 | `maintenance`   | plan items/records/alerts, the due/overdue engine (`engine.py`), pack normalization (`packs.py`), model resolver (`resolver.py`) |
 | `notifications` | channels/preferences/Telegram users, the event catalog + message templates (`event_catalog.py`) |

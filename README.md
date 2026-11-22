@@ -41,6 +41,7 @@ LeapConnect is an independent, community-driven project (see the [disclaimer](#d
 - **Charging tab**: Dedicated hub with automatic session detection, cost & energy KPIs, per-session and daily charts, time-of-use band distribution, monthly summary, and an editable session list
 - **Multi-tier charging costs**: Configurable price tiers for home grid, home solar, public AC, and public DC — flat rate or time-of-use bands (e.g. Italian ARERA F1/F2/F3) — with automatic AC/DC tier detection on each charge
 - **Trips tab**: Driving log grouped by day with distance, energy, and regen; trip detail with GPS route map, speed chart, and per-trip stats; monthly totals
+- **Trip planner**: List the trips of the next days and get told when to charge (day, start and end time, SOC) so the battery stays between 20 % and 80 %, with the SOC, energy and range left after every trip
 - **Trip comparison**: Compare any two trips side-by-side, or auto-discover similar trips by route, time of day, and distance with ranked efficiency insights
 - **Maintenance & health**: Model-aware service schedules (T03, B10, C10 BEV/REEV), service logging, overdue/upcoming tracking, importable [community maintenance packs](https://github.com/markoceri/leapconnect-maintenance-packs), and proactive reminders
 - **Climate scheduling**: Create, edit, and delete scheduled climate pre-conditioning timers

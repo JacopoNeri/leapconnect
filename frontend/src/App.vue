@@ -201,6 +201,11 @@
             v-else-if="store.activeTab === 'trips'"
             :vin="store.selectedVin"
           />
+          <PlannerTab
+            v-else-if="store.activeTab === 'planner'"
+            :vin="store.selectedVin"
+            :status="status"
+          />
           <MaintenanceTab
             v-else-if="store.activeTab === 'maintenance'"
             :vin="store.selectedVin"
@@ -307,13 +312,14 @@ import DetailsTab from './views/DetailsTab.vue'
 import HistoryTab from './views/HistoryTab.vue'
 import ChargingTab from './views/ChargingTab.vue'
 import TripsTab from './views/TripsTab.vue'
+import PlannerTab from './views/PlannerTab.vue'
 import MaintenanceTab from './views/MaintenanceTab.vue'
 import MessagesTab from './views/MessagesTab.vue'
 import SettingsTab from './views/SettingsTab.vue'
 import ZonesTab from './views/ZonesTab.vue'
 import ToastContainer from './components/ToastContainer.vue'
 import MessageDropdown from './components/MessageDropdown.vue'
-import { LayoutDashboard, List, TrendingUp, Mail, Settings, RefreshCw, LogOut, Cloud, CloudOff, Sun, Moon, PanelTop, PanelTopClose, PanelLeft, PanelLeftClose, MoreHorizontal, Bell, BatteryCharging, MapPin, MapPinned, Wrench } from 'lucide-vue-next'
+import { LayoutDashboard, List, TrendingUp, Mail, Settings, RefreshCw, LogOut, Cloud, CloudOff, Sun, Moon, PanelTop, PanelTopClose, PanelLeft, PanelLeftClose, MoreHorizontal, Bell, BatteryCharging, MapPin, MapPinned, Wrench, Route } from 'lucide-vue-next'
 
 const store = useAppStore()
 const { toast } = useToast()
@@ -349,6 +355,7 @@ const tabs = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'charging', label: 'Charging', icon: BatteryCharging },
   { id: 'trips', label: 'Trips', icon: MapPin },
+  { id: 'planner', label: 'Planner', icon: Route },
   { id: 'maintenance', label: 'Maintenance', icon: Wrench },
   { id: 'zones', label: 'Zones', icon: MapPinned },
   { id: 'details', label: 'Details', icon: List },

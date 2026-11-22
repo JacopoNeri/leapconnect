@@ -118,6 +118,15 @@ from leapconnect.api.schemas.telemetry import (  # noqa: F401
     VehicleSnapshotSchema,
     VehicleStatusResponse,
 )
+from leapconnect.api.schemas.trip_planning import (  # noqa: F401
+    ChargeSuggestionSchema,
+    LegResultSchema,
+    PlannedLegSchema,
+    PlannerSettingsSchema,
+    TripPlanDraft,
+    TripPlanRequest,
+    TripPlanResponse,
+)
 from leapconnect.api.schemas.vehicle import (  # noqa: F401
     BatterySchema,
     ChargePlanSchema,
@@ -261,4 +270,11 @@ __all__ = [
     "ZoneCreate",
     "ZoneResponse",
     "ZoneUpdate",
+    "ChargeSuggestionSchema",
+    "LegResultSchema",
+    "PlannedLegSchema",
+    "PlannerSettingsSchema",
+    "TripPlanDraft",
+    "TripPlanRequest",
+    "TripPlanResponse",
 ]
