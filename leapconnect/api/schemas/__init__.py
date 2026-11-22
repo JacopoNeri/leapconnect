@@ -121,9 +121,14 @@ from leapconnect.api.schemas.telemetry import (  # noqa: F401
 from leapconnect.api.schemas.trip_planning import (  # noqa: F401
     ChargeSuggestionSchema,
     LegResultSchema,
+    PlaceSchema,
+    PlaceSearchResult,
     PlannedLegSchema,
     PlannerSettingsSchema,
+    RouteEstimate,
+    SavedRouteSchema,
     TripPlanDraft,
+    TripPlannerLibrary,
     TripPlanRequest,
     TripPlanResponse,
 )
@@ -277,4 +282,9 @@ __all__ = [
     "TripPlanDraft",
     "TripPlanRequest",
     "TripPlanResponse",
+    "PlaceSchema",
+    "PlaceSearchResult",
+    "RouteEstimate",
+    "SavedRouteSchema",
+    "TripPlannerLibrary",
 ]

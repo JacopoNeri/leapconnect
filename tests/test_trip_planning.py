@@ -102,7 +102,6 @@ class TestChargingSuggestions:
             assert charge.to_soc == 80.0
             assert charge.location == "Home"
             assert charge.reason == "required"
-            assert not charge.above_target
 
     def test_charge_times_asap_from_arrival(self):
         legs = [PlannedLeg(datetime(2026, 11, 23, 8, 0), 100, "Trip", duration_min=60)]
@@ -120,15 +119,28 @@ class TestChargingSuggestions:
         assert charge.end == datetime(2026, 11, 23, 8, 0)
         assert charge.start == datetime(2026, 11, 23, 5, 5)
 
-    def test_long_leg_requires_charging_above_target(self):
+    def test_long_leg_with_higher_max_charges_to_max(self):
         # 200 km = 32 kWh = 80 % of the pack: needs 100 % to arrive at 20 %.
         legs = [PlannedLeg(datetime(2026, 11, 23, 8, 0), 200, "Rome", duration_min=150)]
-        plan = plan_trips(legs, _settings(start_soc=50))
+        plan = plan_trips(legs, _settings(start_soc=50, max_soc=100))
         charge = plan.charges[0]
         assert charge.to_soc == 100.0
-        assert charge.above_target
         assert plan.legs[0].soc_end == pytest.approx(20.0)
-        assert any("above 80%" in w for w in plan.warnings)
+        assert plan.feasible
+
+    def test_max_soc_is_a_hard_limit(self):
+        legs = [PlannedLeg(datetime(2026, 11, 23, 8, 0), 200, "Rome", duration_min=150)]
+        plan = plan_trips(legs, _settings(start_soc=50))
+        assert plan.charges[0].to_soc == 80.0
+        assert not plan.feasible
+        assert any("between your limits" in w for w in plan.warnings)
+
+    def test_custom_limits(self):
+        legs = [PlannedLeg(datetime(2026, 11, 23, 8, 0), 100, "Trip", duration_min=60)]
+        plan = plan_trips(legs, _settings(start_soc=40, min_soc=10, max_soc=90))
+        assert plan.charges[0].to_soc == 90.0
+        # 90 % - 40 % = 50 %; (50 % - 10 %) of 40 kWh = 16 kWh = 100 km.
+        assert plan.legs[0].range_to_min_km == 100
 
     def test_short_window_is_limited_by_time(self):
         legs = [
@@ -160,10 +172,45 @@ class TestChargingSuggestions:
         assert any("charge at Milan" in w for w in plan.warnings)
 
     def test_topup_threshold_charges_even_if_not_required(self):
-        legs = [PlannedLeg(datetime(2026, 11, 23, 8, 0), 10, "Shop", duration_min=15)]
-        plan = plan_trips(legs, _settings(start_soc=28, topup_below_soc=30))
+        legs = [
+            PlannedLeg(
+                datetime(2026, 11, 23, 8, 0),
+                10,
+                "Home",
+                duration_min=15,
+                charger_at_destination=True,
+            ),
+            PlannedLeg(datetime(2026, 11, 23, 18, 0), 10, "Shop", duration_min=15),
+        ]
+        plan = plan_trips(legs, _settings(start_soc=31, topup_below_soc=30))
+        assert [c.window_index for c in plan.charges] == [1]
         assert plan.charges[0].reason == "topup"
         assert plan.charges[0].to_soc == 80.0
+
+    def test_no_charge_before_first_trip_if_battery_is_enough(self):
+        # Low battery and a charger at the start, but the first trip can be
+        # driven and there is a charger where it ends: charge there.
+        legs = _commute(23, km=10, office_charger=True)
+        plan = plan_trips(legs, _settings(start_soc=26, topup_below_soc=50))
+        assert plan.charges
+        assert all(c.window_index > 0 for c in plan.charges)
+        assert plan.feasible
+
+    def test_only_places_with_a_charger(self):
+        legs = _commute(23, km=50)  # charger only at home, in the evening
+        plan = plan_trips(legs, _settings(start_soc=70, charger_at_start=False))
+        assert all(c.location == "Home" for c in plan.charges)
+
+    def test_trips_already_departed_are_ignored(self):
+        legs = [
+            PlannedLeg(datetime(2026, 11, 22, 8, 0), 50, "Past", duration_min=60),
+            PlannedLeg(datetime(2026, 11, 23, 8, 0), 25, "Office", duration_min=30),
+        ]
+        plan = plan_trips(legs, _settings())
+        assert [leg.label for leg in plan.legs] == ["Office"]
+        assert plan.legs[0].soc_start == 60.0
+        assert all(c.start >= START for c in plan.charges)
+        assert any("already departed" in w for w in plan.warnings)
 
     def test_final_charge_after_last_leg(self):
         legs = [
@@ -192,7 +239,7 @@ class TestChargingSuggestions:
         with pytest.raises(ValueError):
             plan_trips([], _settings(capacity_kwh=0))
         with pytest.raises(ValueError):
-            plan_trips([], _settings(min_soc=90, target_soc=80))
+            plan_trips([], _settings(min_soc=90, max_soc=80))
 
 
 class TestTripPlanApi:
@@ -207,6 +254,7 @@ class TestTripPlanApi:
                 "start_soc": 30,
                 "capacity_kwh": 40,
                 "consumption_kwh_100km": 16,
+                "charger_at_start": True,
             },
             "legs": [
                 {"label": "Work", "departure": "2026-11-23T08:00", "distance_km": 100},
@@ -256,3 +304,75 @@ class TestTripPlanApi:
             auth_client.get("/api/vehicles/VIN1/trip-plan/draft").json()["draft"]
             is None
         )
+
+
+class TestTripPlannerLibraryApi:
+    def test_library_roundtrip_drops_orphan_routes(self, auth_client):
+        assert auth_client.get("/api/trip-planner/library").json() == {
+            "places": [],
+            "routes": [],
+        }
+        home = {"id": "h", "name": "Home", "latitude": 43.7, "longitude": 11.2}
+        work = {"id": "w", "name": "Work", "latitude": 43.8, "longitude": 11.3}
+        body = {
+            "places": [{**home, "charger": True}, work],
+            "routes": [
+                {
+                    "id": "r1",
+                    "from_place_id": "h",
+                    "to_place_id": "w",
+                    "distance_km": 18,
+                    "departure_time": "08:00",
+                },
+                {
+                    "id": "r2",
+                    "from_place_id": "h",
+                    "to_place_id": "x",
+                    "distance_km": 5,
+                },
+            ],
+        }
+        resp = auth_client.put("/api/trip-planner/library", json=body)
+        assert resp.status_code == 200, resp.text
+        data = auth_client.get("/api/trip-planner/library").json()
+        assert [p["id"] for p in data["places"]] == ["h", "w"]
+        assert data["places"][0]["charger"] is True
+        assert [r["id"] for r in data["routes"]] == ["r1"]
+
+    def test_invalid_departure_time_rejected(self, auth_client):
+        body = {
+            "places": [],
+            "routes": [
+                {
+                    "id": "r",
+                    "from_place_id": "a",
+                    "to_place_id": "b",
+                    "distance_km": 1,
+                    "departure_time": "25:00",
+                }
+            ],
+        }
+        assert (
+            auth_client.put("/api/trip-planner/library", json=body).status_code == 422
+        )
+
+    def test_search_and_route(self, auth_client, monkeypatch):
+        from leapconnect.api.routers import trip_planning as router_mod
+        from leapconnect.infrastructure.geocoding import Place
+        from leapconnect.infrastructure.routing import RouteInfo
+
+        async def fake_search(query, *, limit=1, language="it"):
+            return [Place(43.77, 11.25, "Duomo", "Piazza del Duomo, Firenze")]
+
+        async def fake_route(lat1, lon1, lat2, lon2):
+            return RouteInfo(distance_km=12.3, duration_min=21)
+
+        monkeypatch.setattr(router_mod, "search_places", fake_search)
+        monkeypatch.setattr(router_mod, "driving_route", fake_route)
+        resp = auth_client.get("/api/trip-planner/search", params={"q": "duomo"})
+        assert resp.json()[0]["name"] == "Duomo"
+        resp = auth_client.get(
+            "/api/trip-planner/route",
+            params={"from_lat": 43.7, "from_lon": 11.2, "to_lat": 43.8, "to_lon": 11.3},
+        )
+        assert resp.json() == {"distance_km": 12.3, "duration_min": 21}

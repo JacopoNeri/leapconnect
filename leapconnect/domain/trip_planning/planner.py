@@ -6,12 +6,14 @@ charger there. The planner simulates the state of charge (SOC) leg by leg and
 suggests charging sessions (day, start and end time, from/to SOC) so that:
 
 - the SOC never drops below ``min_soc`` (20 % by default) at any arrival;
-- charging stops at ``target_soc`` (80 %, the battery-friendly level) unless
-  a long leg makes a higher level unavoidable, in which case the plan says so;
-- the car is plugged in as few times as possible: a session is suggested only
-  when the SOC would otherwise not be enough to reach the next opportunity
-  (computed with a backward pass that knows how much every later window can
-  add), or when the SOC is already below ``topup_below_soc``.
+- charging never goes above ``max_soc`` (80 % by default): both limits are
+  hard, and when the trips cannot be driven within them the plan says so;
+- charges are suggested only at places with a charger, only from
+  ``start_time`` on (trips that already departed are ignored), and as late as
+  possible: a session is suggested only when the SOC would otherwise not be
+  enough to reach the next opportunity (computed with a backward pass that
+  knows how much every later window can add), or when the SOC is below
+  ``topup_below_soc`` -- never before the first trip unless that trip needs it.
 
 Everything here is pure: times are naive local datetimes, as entered by the
 user, and all energy figures are in kWh.
@@ -58,20 +60,23 @@ class PlannerSettings:
     capacity_kwh: float
     consumption_kwh_100km: float
     start_label: str = "Start"
-    charger_at_start: bool = True
+    charger_at_start: bool = False
     start_charger_power_kw: float | None = None
     default_charger_power_kw: float = 7.0
     #: Share of the charger energy that ends up in the battery.
     charging_efficiency: float = 0.9
-    target_soc: float = 80.0
+    #: Highest acceptable SOC: charging never goes above it.
+    max_soc: float = 80.0
+    #: Lowest acceptable SOC: no arrival should drop below it.
     min_soc: float = 20.0
     #: Extra consumption added to every leg (percent), for weather/traffic.
     safety_margin_pct: float = 10.0
     avg_speed_kmh: float = 50.0
     #: ``asap`` = start charging on arrival, ``late`` = finish at departure.
     charge_timing: ChargeTiming = "asap"
-    #: Top up to ``target_soc`` at any charger when below this SOC (None = off).
-    topup_below_soc: float | None = 30.0
+    #: Top up to ``max_soc`` at any charger after the first trip when below
+    #: this SOC (None = off).
+    topup_below_soc: float | None = None
 
 
 @dataclass(frozen=True)
@@ -91,8 +96,6 @@ class ChargeSuggestion:
     power_kw: float
     #: ``required`` (needed for the next legs) or ``topup`` (low SOC).
     reason: Literal["required", "topup"]
-    #: True when the session has to go above the target SOC.
-    above_target: bool = False
     #: True when the window is too short to reach the wanted SOC.
     limited_by_time: bool = False
 
@@ -176,6 +179,15 @@ def _max_gain(window: _Window, settings: PlannerSettings) -> float:
     return window.hours() * _soc_per_hour(window, settings)
 
 
+def _past_legs_warning(count: int) -> str:
+    what = (
+        "trip that already departed was"
+        if count == 1
+        else ("trips that already departed were")
+    )
+    return f"{count} {what} ignored: the plan starts from the battery level now."
+
+
 def _build_windows(
     legs: list[PlannedLeg],
     arrivals: list[datetime],
@@ -237,13 +249,16 @@ def _plan_charge(
     if not window.charger or window.power_kw <= 0:
         return None
     needed = soc < required - _EPS
+    # Top-ups only after the first trip: before it, charge only if needed.
     topup = (
-        settings.topup_below_soc is not None and soc < settings.topup_below_soc - _EPS
+        window.index > 0
+        and settings.topup_below_soc is not None
+        and soc < settings.topup_below_soc - _EPS
     )
     if not (needed or topup):
         return None
 
-    wanted = min(100.0, max(settings.target_soc, required if needed else 0.0))
+    wanted = settings.max_soc
     reachable = min(wanted, soc + _max_gain(window, settings))
     if reachable <= soc + _EPS:
         return None
@@ -261,7 +276,6 @@ def _plan_charge(
         grid_energy_kwh=round(energy / settings.charging_efficiency, 2),
         power_kw=window.power_kw,
         reason="required" if needed else "topup",
-        above_target=reachable > settings.target_soc + _EPS,
         limited_by_time=reachable < wanted - _EPS,
     )
 
@@ -273,8 +287,8 @@ def _validate(settings: PlannerSettings) -> None:
         raise ValueError("Consumption must be positive")
     if not 0 < settings.charging_efficiency <= 1:
         raise ValueError("Charging efficiency must be in (0, 1]")
-    if not 0 <= settings.min_soc < settings.target_soc <= 100:
-        raise ValueError("Expected 0 <= min SOC < target SOC <= 100")
+    if not 0 <= settings.min_soc < settings.max_soc <= 100:
+        raise ValueError("Expected 0 <= minimum SOC < maximum SOC <= 100")
     if not 0 <= settings.start_soc <= 100:
         raise ValueError("Start SOC must be between 0 and 100")
 
@@ -283,9 +297,17 @@ def plan_trips(legs: list[PlannedLeg], settings: PlannerSettings) -> TripPlan:
     """Simulate ``legs`` from ``settings`` and suggest charging sessions."""
     _validate(settings)
     warnings: list[str] = []
-    legs = sorted(legs, key=lambda leg: leg.departure)
+    upcoming = [leg for leg in legs if leg.departure >= settings.start_time]
+    if len(upcoming) < len(legs):
+        warnings.append(_past_legs_warning(len(legs) - len(upcoming)))
+    legs = sorted(upcoming, key=lambda leg: leg.departure)
     if not legs:
-        return TripPlan(legs=[], charges=[], final_soc=_round_soc(settings.start_soc))
+        return TripPlan(
+            legs=[],
+            charges=[],
+            warnings=warnings,
+            final_soc=_round_soc(settings.start_soc),
+        )
 
     capacity = settings.capacity_kwh
     margin = 1 + max(0.0, settings.safety_margin_pct) / 100
@@ -301,11 +323,7 @@ def plan_trips(legs: list[PlannedLeg], settings: PlannerSettings) -> TripPlan:
     ]
     drops = [e / capacity * 100 for e in energies]
 
-    if legs[0].departure < settings.start_time:
-        warnings.append(
-            f"{_leg_label(legs[0], 0)} departs before the plan starts: "
-            "no time to charge before it."
-        )
+    usable = settings.max_soc - settings.min_soc
     for k in range(1, len(legs)):
         if legs[k].departure < arrivals[k - 1]:
             warnings.append(
@@ -313,27 +331,28 @@ def plan_trips(legs: list[PlannedLeg], settings: PlannerSettings) -> TripPlan:
                 f"{_leg_label(legs[k - 1], k - 1)} arrives."
             )
     for k, drop in enumerate(drops):
-        if drop > 100 - settings.min_soc + _EPS:
+        if drop > usable + _EPS:
             warnings.append(
-                f"{_leg_label(legs[k], k)} needs {drop:.0f}% of the battery: "
-                f"it cannot be driven without dropping below {settings.min_soc:.0f}%"
-                " — plan a charging stop along the way."
+                f"{_leg_label(legs[k], k)} needs {drop:.0f}% of the battery, more "
+                f"than the {usable:.0f}% between your limits "
+                f"({settings.min_soc:.0f}-{settings.max_soc:.0f}%): plan a "
+                "charging stop along the way or widen the limits."
             )
 
     windows = _build_windows(legs, arrivals, settings)
 
     # Backward pass: required[k] = SOC needed when leaving window k (i.e. at
     # the departure of leg k) so every later arrival stays >= min_soc, given
-    # how much each later window can add (capped at 100 %).
+    # how much each later window can add (capped at ``max_soc``).
     n = len(legs)
     required = [0.0] * n
     arrival_need = settings.min_soc  # SOC needed when arriving after leg k
     for k in range(n - 1, -1, -1):
         required[k] = drops[k] + arrival_need
-        gain = min(_max_gain(windows[k], settings), max(0.0, 100 - settings.min_soc))
-        # A window can never charge above 100 %: beyond that the plan is
+        gain = min(_max_gain(windows[k], settings), usable)
+        # A window never charges above ``max_soc``: beyond that the plan is
         # infeasible anyway (reported below), so do not push the need back.
-        arrival_need = max(settings.min_soc, min(required[k], 100.0) - gain)
+        arrival_need = max(settings.min_soc, min(required[k], settings.max_soc) - gain)
 
     soc = settings.start_soc
     charges: list[ChargeSuggestion] = []
@@ -343,11 +362,6 @@ def plan_trips(legs: list[PlannedLeg], settings: PlannerSettings) -> TripPlan:
         if charge is not None:
             charges.append(charge)
             soc = charge.to_soc
-            if charge.above_target:
-                warnings.append(
-                    f"Charge to {charge.to_soc:.0f}% at {charge.location} "
-                    f"(above {settings.target_soc:.0f}%) to cover the next trips."
-                )
             if charge.limited_by_time and soc < required[k] - _EPS:
                 warnings.append(
                     f"The stop at {charge.location} is too short to charge enough "

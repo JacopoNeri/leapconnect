@@ -39,7 +39,7 @@ One subpackage per **bounded context**:
 |-----------------|----------|
 | `telemetry`     | `VehicleSnapshot`, `VehicleEvent`, `TransitionDetector` (state-change rules), battery SOH estimate from full-charge readings (`battery_health.py`) |
 | `trips`         | trip segmentation/merging, similarity scoring, charge-session detection (`analysis.py`) — trips are derived on the fly, there is no persistent Trip aggregate |
-| `trip_planning` | multi-day trip planner: SOC simulation leg by leg and charging suggestions (`planner.py`) — stateless, only the user's planner form is stored (settings table) |
+| `trip_planning` | multi-day trip planner: SOC simulation leg by leg and charging suggestions (`planner.py`) — stateless, only the user's planner form and saved places/frequent trips are stored (settings table) |
 | `charging`      | price tiers, time-of-use bands, session costs, TOU cost calculation (`costing.py`) |
 | `maintenance`   | plan items/records/alerts, the due/overdue engine (`engine.py`), pack normalization (`packs.py`), model resolver (`resolver.py`) |
 | `notifications` | channels/preferences/Telegram users, the event catalog + message templates (`event_catalog.py`) |
@@ -101,6 +101,7 @@ Enforced by `tests/test_architecture.py`.
 - `mqtt/home_assistant.py` — Home Assistant MQTT discovery bridge.
 - `telegram/` — bot polling (`bot.py`), notifier (`notifier.py`), config.
 - `abrp/service.py` — A Better Route Planner telemetry.
+- `routing.py` — driving distance/time between two points (public OSRM server, cached in memory) for the trip planner.
 - `community.py` — GitHub fetcher for community maintenance packs.
 - `logbuffer.py` — in-memory ring buffer behind the log viewer.
 
