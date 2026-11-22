@@ -96,8 +96,10 @@ class PlaceSchema(BaseModel):
     id: str = Field(..., min_length=1, max_length=40)
     name: str = Field(..., min_length=1, max_length=80)
     address: str = Field("", max_length=300)
-    latitude: float = Field(..., ge=-90, le=90)
-    longitude: float = Field(..., ge=-180, le=180)
+    #: None for a place typed by hand (distances are then entered by hand).
+    latitude: float | None = Field(None, ge=-90, le=90)
+    longitude: float | None = Field(None, ge=-180, le=180)
+    #: Whether the car can be charged here; the plan decides when.
     charger: bool = False
     charger_power_kw: float | None = Field(None, gt=0, le=400)
 

@@ -103,6 +103,16 @@ class TestChargingSuggestions:
             assert charge.location == "Home"
             assert charge.reason == "required"
 
+    def test_home_charger_on_every_trip_is_used_only_when_needed(self):
+        # Home has a charger, so every evening is a chance to charge: the plan
+        # must not suggest one per evening, only when the next days need it.
+        legs = [leg for day in range(23, 28) for leg in _commute(day, km=20)]
+        plan = plan_trips(legs, _settings(charger_at_start=True))
+        assert plan.feasible
+        assert len(plan.charges) == 1
+        assert plan.charges[0].location == "Home"
+        assert all(leg.soc_end >= 20 for leg in plan.legs)
+
     def test_charge_times_asap_from_arrival(self):
         legs = [PlannedLeg(datetime(2026, 11, 23, 8, 0), 100, "Trip", duration_min=60)]
         plan = plan_trips(legs, _settings(start_soc=30))
@@ -313,7 +323,7 @@ class TestTripPlannerLibraryApi:
             "routes": [],
         }
         home = {"id": "h", "name": "Home", "latitude": 43.7, "longitude": 11.2}
-        work = {"id": "w", "name": "Work", "latitude": 43.8, "longitude": 11.3}
+        work = {"id": "w", "name": "Work"}  # typed by hand, no coordinates
         body = {
             "places": [{**home, "charger": True}, work],
             "routes": [
@@ -337,6 +347,7 @@ class TestTripPlannerLibraryApi:
         data = auth_client.get("/api/trip-planner/library").json()
         assert [p["id"] for p in data["places"]] == ["h", "w"]
         assert data["places"][0]["charger"] is True
+        assert data["places"][1]["latitude"] is None
         assert [r["id"] for r in data["routes"]] == ["r1"]
 
     def test_invalid_departure_time_rejected(self, auth_client):

@@ -30,6 +30,7 @@
         <button v-for="z in zoneMatches" :key="'z' + z.id" class="pp-item" @click="pickZone(z)">
           <MapPin :size="13" class="pp-icon" />
           <span class="pp-text"><b>{{ z.name }}</b></span>
+          <Plug v-if="z.charging_tier_id" :size="12" class="pp-icon plug" />
         </button>
       </template>
 
@@ -143,7 +144,8 @@ async function search() {
 function done(ref) { emit('select', ref); close() }
 function pickSaved(p) { done({ placeId: p.id }) }
 function pickZone(z) {
-  done({ name: z.name, address: '', latitude: z.latitude, longitude: z.longitude, charger: false, charger_power_kw: null })
+  // A zone with a charging tariff is where you charge (e.g. home).
+  done({ name: z.name, address: '', latitude: z.latitude, longitude: z.longitude, charger: !!z.charging_tier_id, charger_power_kw: null })
 }
 function pickResult(r) {
   done({ name: r.name || r.address.split(',')[0], address: r.address, latitude: r.latitude, longitude: r.longitude, charger: false, charger_power_kw: null })

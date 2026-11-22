@@ -33,11 +33,10 @@
               />
               <button v-if="canSavePlace(form.start_place)" class="icon-btn" title="Save this place" @click="savePlaceRef(form.start_place)"><Star :size="14" /></button>
             </div>
+            <button v-if="form.start_place" class="charge-chip" :class="{ on: !!startPlace?.charger }" :title="chargeSpotTitle(form.start_place)" @click="toggleChargeSpot(form.start_place)">
+              <Plug :size="12" /> {{ chargeSpotLabel(form.start_place) }}
+            </button>
           </div>
-          <label class="field field-toggle">
-            <span class="field-label">Charger there</span>
-            <ToggleSwitch :model-value="!!startPlace?.charger" @update:model-value="(v) => setCharger(form.start_place, v)" />
-          </label>
           <label class="field">
             <span class="field-label">From</span>
             <input v-model="form.start_time" type="datetime-local" />
@@ -150,7 +149,7 @@
           <Bookmark :size="15" /> Frequent trips
           <span class="card-title-sub">{{ library.routes.length }} saved</span>
           <button class="link-btn right" @click="showPlaces = !showPlaces">
-            {{ showPlaces ? 'Hide places' : `Places (${library.places.length})` }}
+            {{ showPlaces ? 'Hide places' : `Places & chargers (${library.places.length})` }}
           </button>
         </div>
 
@@ -189,15 +188,15 @@
         </template>
 
         <div v-if="showPlaces" class="places-box">
-          <div class="places-title">Saved places</div>
+          <div class="places-title">Saved places <span class="places-sub">· <Plug :size="11" class="inline-icon" /> = you can charge there, the plan decides when</span></div>
           <div v-if="!library.places.length" class="empty-legs">No saved places yet: search one below or tap <Star :size="12" class="inline-icon" /> next to a place.</div>
           <div v-for="p in library.places" :key="p.id" class="place-row">
             <Star :size="14" class="star-icon" />
             <div class="place-info">
               <input v-model="p.name" type="text" maxlength="80" class="place-name" />
-              <small>{{ p.address || `${p.latitude.toFixed(4)}, ${p.longitude.toFixed(4)}` }}</small>
+              <small>{{ p.address || (p.latitude != null ? `${p.latitude.toFixed(4)}, ${p.longitude.toFixed(4)}` : 'No address: distances by hand') }}</small>
             </div>
-            <label class="place-charger" title="Charger at this place">
+            <label class="place-charger" title="You can charge at this place: the plan decides when">
               <Plug :size="13" />
               <ToggleSwitch v-model="p.charger" />
             </label>
@@ -246,6 +245,9 @@
                   />
                   <button v-if="canSavePlace(leg.to)" class="icon-btn" title="Save this place" @click="savePlaceRef(leg.to)"><Star :size="14" /></button>
                 </div>
+                <button v-if="leg.to" class="charge-chip" :class="{ on: !!resolve(leg.to)?.charger }" :title="chargeSpotTitle(leg.to)" @click="toggleChargeSpot(leg.to)">
+                  <Plug :size="12" /> {{ chargeSpotLabel(leg.to) }}
+                </button>
               </div>
               <label class="field grow">
                 <span class="field-label">Departure</span>
@@ -271,17 +273,6 @@
                 <div class="input-unit">
                   <input :value="leg.duration_min" type="number" min="1" max="2880" step="1" placeholder="auto" @input="setManual(leg, 'duration_min', $event)" />
                   <span>min</span>
-                </div>
-              </label>
-              <label class="field field-toggle">
-                <span class="field-label">Charger there</span>
-                <ToggleSwitch :model-value="!!resolve(leg.to)?.charger" @update:model-value="(v) => setCharger(leg.to, v)" />
-              </label>
-              <label v-if="resolve(leg.to)?.charger" class="field small">
-                <span class="field-label">Power</span>
-                <div class="input-unit">
-                  <input :value="resolve(leg.to).charger_power_kw" type="number" min="1" max="400" step="0.1" :placeholder="String(form.default_charger_power_kw)" @input="setPower(leg.to, $event)" />
-                  <span>kW</span>
                 </div>
               </label>
             </div>
@@ -368,6 +359,7 @@
                     {{ fmtTime(item.data.departure) }} → {{ fmtTime(item.data.arrival) }}
                     · {{ item.data.energy_kwh.toFixed(1) }} kWh
                   </div>
+                  <div v-if="item.idleCharger" class="tl-note"><Plug :size="11" class="inline-icon" /> You can charge here, but it is not needed</div>
                   <div class="soc-bar">
                     <div class="soc-bar-used" :style="usedStyle(item.data)" />
                     <div class="soc-bar-fill" :style="{ width: clampPct(item.data.soc_end) + '%', background: socColor(item.data.soc_end) }" />
@@ -503,28 +495,42 @@ function placeName(ref) { return resolve(ref)?.name || '' }
 function hasCoords(p) { return !!p && p.latitude != null && p.longitude != null }
 const startPlace = computed(() => resolve(form.start_place))
 
-function setCharger(ref, value) {
-  const place = resolve(ref)
-  if (place) place.charger = value
+// Whether you can charge somewhere belongs to the place (e.g. home), so it
+// is saved in the library and applies to every trip there; the plan then
+// decides if and when to charge.
+function toggleChargeSpot(ref) {
+  const id = savePlaceRef(ref)
+  const place = id && placeById(id)
+  if (place) place.charger = !place.charger
 }
-function setPower(ref, event) {
+function chargeSpotLabel(ref) {
   const place = resolve(ref)
-  if (place) place.charger_power_kw = event.target.value === '' ? null : Number(event.target.value)
+  if (!place?.charger) return 'I can charge here'
+  const kw = place.charger_power_kw > 0 ? place.charger_power_kw : form.default_charger_power_kw
+  return `Charging spot · ${kw} kW`
 }
-function canSavePlace(ref) { return !!ref && !ref.placeId && hasCoords(ref) }
+function chargeSpotTitle(ref) {
+  const name = placeName(ref) || 'this place'
+  return resolve(ref)?.charger
+    ? `You can charge at ${name} (every trip there). The plan suggests a charge only when needed. Tap to remove; change the power under Places & chargers.`
+    : `Mark ${name} as a place where you can charge (applies to every trip there)`
+}
+function canSavePlace(ref) { return !!ref && !ref.placeId }
 function samePlace(a, b) {
-  return a && b && !a.placeId && !b.placeId && a.name === b.name && a.latitude === b.latitude && a.longitude === b.longitude
+  return a && b && !a.placeId && !b.placeId && a.name === b.name && (a.latitude ?? null) === (b.latitude ?? null) && (a.longitude ?? null) === (b.longitude ?? null)
 }
 // Save an ad-hoc place in the library and point every use of it there.
 function savePlaceRef(ref) {
   if (!ref) return null
   if (ref.placeId) return ref.placeId
-  if (!hasCoords(ref)) return null
-  const id = uid()
-  library.places.push({
-    id, name: ref.name.slice(0, 80) || 'Place', address: (ref.address || '').slice(0, 300),
-    latitude: ref.latitude, longitude: ref.longitude, charger: !!ref.charger, charger_power_kw: ref.charger_power_kw || null,
-  })
+  const existing = library.places.find((p) => p.name === ref.name && p.latitude === (ref.latitude ?? null) && p.longitude === (ref.longitude ?? null))
+  const id = existing ? existing.id : uid()
+  if (!existing) {
+    library.places.push({
+      id, name: (ref.name || 'Place').slice(0, 80), address: (ref.address || '').slice(0, 300),
+      latitude: ref.latitude ?? null, longitude: ref.longitude ?? null, charger: !!ref.charger, charger_power_kw: ref.charger_power_kw || null,
+    })
+  }
   const target = { ...ref }
   if (samePlace(form.start_place, target)) form.start_place = { placeId: id }
   for (const leg of form.legs) if (samePlace(leg.to, target)) leg.to = { placeId: id }
@@ -678,12 +684,12 @@ function deleteRoute(route) { library.routes.splice(library.routes.indexOf(route
 
 function canSaveRoute(leg) {
   const from = originRef(leg)
-  return !!from && !!leg.to && leg.distance_km > 0 && (from.placeId || hasCoords(from)) && (leg.to.placeId || hasCoords(leg.to))
+  return !!from && !!leg.to && leg.distance_km > 0
 }
 function isRouteSaved(leg) { return !!savedRouteBetween(originRef(leg), leg.to) }
 function saveRouteTitle(leg) {
   if (isRouteSaved(leg)) return 'Saved as a frequent trip (tap to update it)'
-  if (!canSaveRoute(leg)) return 'Pick both places from the search to save this trip'
+  if (!canSaveRoute(leg)) return 'Pick a destination and a distance to save this trip'
   return 'Save as a frequent trip'
 }
 function saveRoute(leg) {
@@ -752,6 +758,7 @@ async function computePlan() {
   try {
     const result = await api('POST', `/api/vehicles/${props.vin}/trip-plan`, body)
     if (seq !== planSeq) return
+    sentLegs.value = body.legs
     plan.value = result
     planError.value = ''
   } catch (err) {
@@ -764,14 +771,19 @@ const lastLeg = computed(() => plan.value?.legs[plan.value.legs.length - 1])
 const totalKm = computed(() => (plan.value?.legs || []).reduce((s, l) => s + l.distance_km, 0))
 const totalChargeKwh = computed(() => (plan.value?.charges || []).reduce((s, c) => s + c.energy_kwh, 0))
 
+// The legs as last sent to the server, aligned with plan.legs.
+const sentLegs = ref([])
 const timelineDays = computed(() => {
   if (!plan.value) return []
   const legs = plan.value.legs
+  const chargedWindows = new Set(plan.value.charges.map((c) => c.window_index))
   const items = [
     ...plan.value.charges.map((c, i) => ({ type: 'charge', key: `c${i}`, time: c.start, order: 0, data: c })),
     ...legs.map((l, i) => ({
       type: 'leg', key: `l${i}`, time: l.departure, order: 1, data: l,
       from: i ? legs[i - 1].label : (startPlace.value?.name || 'Start'),
+      // Window i + 1 follows leg i: a charger there that the plan leaves unused.
+      idleCharger: !!sentLegs.value[i]?.charger_at_destination && !chargedWindows.has(i + 1),
     })),
   ].sort((a, b) => a.time.localeCompare(b.time) || a.order - b.order)
   const days = []
@@ -986,7 +998,7 @@ onBeforeUnmount(() => {
 .leg-fields { flex: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; }
 .leg-fields .grow { grid-column: 1 / -1; }
 @media (min-width: 900px) {
-  .leg-fields { grid-template-columns: 2.2fr 1.5fr 0.85fr 0.8fr 0.8fr 0.8fr; }
+  .leg-fields { grid-template-columns: 2.4fr 1.5fr 0.9fr 0.9fr; }
   .leg-fields .grow { grid-column: auto; }
 }
 .leg-actions { display: flex; flex-direction: column; gap: 4px; margin-top: 16px; }
@@ -1075,4 +1087,9 @@ onBeforeUnmount(() => {
   .place-row { flex-wrap: wrap; }
   .place-info { flex-basis: calc(100% - 30px); }
 }
+.charge-chip { align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; background: none; border: 1px dashed var(--border); color: var(--muted); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; cursor: pointer; font-family: inherit; }
+.charge-chip:hover { color: var(--green); border-color: var(--green); }
+.charge-chip.on { border-style: solid; color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); background: color-mix(in srgb, var(--green) 10%, transparent); }
+.tl-note { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.places-sub { text-transform: none; letter-spacing: 0; color: var(--muted); }
 </style>
